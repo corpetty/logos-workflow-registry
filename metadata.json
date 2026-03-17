@@ -1,0 +1,14 @@
+{
+  "name": "workflow_registry",
+  "version": "1.0.0",
+  "description": "Discovers loaded Logos modules and translates method signatures into workflow node type definitions",
+  "author": "Logos Core Team",
+  "type": "core",
+  "category": "integration",
+  "main": "workflow_registry_plugin",
+  "dependencies": [],
+  "capabilities": [
+    "module_introspection",
+    "node_type_registry"
+  ]
+}
