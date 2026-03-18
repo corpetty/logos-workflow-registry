@@ -82,21 +82,27 @@ logos-workflow-registry/
 
 ### With Nix (recommended)
 
+The registry has no upstream module dependencies, so it builds standalone. It uses `logos-module-builder` to provide the CMake helpers and SDK headers.
+
 ```bash
 nix build
 ```
 
+Output: `result/lib/workflow_registry_plugin.so`
+
+This is the first module in the build chain — **build and push the registry before building the engine, scheduler, or canvas**, since they reference it as a flake input.
+
 ### With CMake
 
-Requires a built `logos-core` SDK available on your path or via `CMAKE_PREFIX_PATH`.
+Requires `logos-module-builder` CMake helpers and `LogosModule.cmake` on your include path. Set `LOGOS_CPP_SDK_ROOT` and `LOGOS_LIBLOGOS_ROOT` to point to your SDK installations.
 
 ```bash
 mkdir build && cd build
-cmake .. -DCMAKE_PREFIX_PATH=/path/to/logos-core
-make -j$(nproc)
+cmake .. -GNinja
+ninja
 ```
 
-The output is a shared library (`workflow_registry_plugin.so`) that `logoscore` loads as a plugin.
+Output: `build/modules/workflow_registry_plugin.so`
 
 ---
 
