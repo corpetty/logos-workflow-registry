@@ -16,6 +16,20 @@ using nlohmann::json;
 
 namespace {
 
+// How long to wait for one module to answer an introspection call.
+//
+// This is NOT a tuning knob, it is the difference between a usable palette and
+// a frozen UI. The registry introspects every module it finds ON DISK, and a
+// module that is installed but not LOADED has no listener: the protocol
+// default blocks the caller for 20 SECONDS before failing, once per such
+// module, while the canvas waits on getNodeTypeDefinitions(). Two unloaded
+// modules were enough to make the canvas look hung.
+//
+// A loaded module answers this in single-digit milliseconds, so a short
+// deadline costs a live module nothing and turns a dead one into a fast,
+// correctly-reported "installed, not live".
+constexpr int kIntrospectTimeoutMs = 1500;
+
 // Qt/LIDL type names -> the port types the canvas draws and the engine
 // type-checks. Anything unrecognised becomes "object", the permissive case:
 // the canvas will still wire it, it just won't pretty-print it.
@@ -245,7 +259,18 @@ std::vector<DiscoveredModule> RegistryBridgeLp::discoverModules(const std::strin
         logos::LpClient client(facts.name, m_origin);
 
         logos::CallError err;
-        const json methodsRaw = asArray(client.invoke("getPluginMethods", json::array(), &err));
+        const json methodsRaw =
+            asArray(client.invoke("getPluginMethods", json::array(), &err, kIntrospectTimeoutMs));
+
+        // Nothing answered — installed but not loaded. Skip the second call
+        // rather than spend the deadline again on a module already known to be
+        // silent.
+        if (!err.code.empty()) {
+            std::fprintf(stderr, "[workflow_registry] %s installed, not live (%s)\n",
+                         facts.name.c_str(), err.message.c_str());
+            modules.push_back(std::move(mod));
+            continue;
+        }
 
         for (const auto& entry : methodsRaw) {
             const std::string methodName = stringField(entry, "name");
@@ -263,7 +288,8 @@ std::vector<DiscoveredModule> RegistryBridgeLp::discoverModules(const std::strin
 
         // Events became a first-class part of the module surface after this
         // registry was written; they are what a trigger node subscribes to.
-        const json eventsRaw = asArray(client.invoke("getPluginEvents", json::array(), &err));
+        const json eventsRaw =
+            asArray(client.invoke("getPluginEvents", json::array(), &err, kIntrospectTimeoutMs));
 
         for (const auto& entry : eventsRaw) {
             const std::string eventName = stringField(entry, "name");
