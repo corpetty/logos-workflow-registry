@@ -1,0 +1,248 @@
+#include "registry_bridge_lp.h"
+
+#include "logos_call_error.h"
+#include "logos_lp_client.h"
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+
+namespace fs = std::filesystem;
+using nlohmann::json;
+
+namespace {
+
+// Qt/LIDL type names -> the port types the canvas draws and the engine
+// type-checks. Anything unrecognised becomes "object", the permissive case:
+// the canvas will still wire it, it just won't pretty-print it.
+std::string mapType(const std::string& raw)
+{
+    if (raw == "QString" || raw == "std::string" || raw == "tstr" ||
+        raw == "string" || raw == "char*" || raw == "const char*")
+        return "string";
+
+    if (raw == "int" || raw == "qint32" || raw == "qint64" || raw == "int32_t" ||
+        raw == "int64_t" || raw == "uint" || raw == "double" || raw == "float" ||
+        raw == "float64" || raw == "number")
+        return "number";
+
+    if (raw == "bool" || raw == "boolean")
+        return "boolean";
+
+    if (raw == "QByteArray" || raw == "bytes" || raw == "bstr")
+        return "bytes";
+
+    if ((!raw.empty() && raw.front() == '[') ||
+        raw.rfind("QList", 0) == 0 || raw.rfind("QVector", 0) == 0 ||
+        raw == "QVariantList" || raw == "QJsonArray" || raw == "QStringList" ||
+        raw == "array")
+        return "array";
+
+    return "object";
+}
+
+// Lifecycle and plumbing members that are never workflow steps.
+bool isInternalMethod(const std::string& name)
+{
+    static const std::vector<std::string> kInternal = {
+        "initLogos", "eventResponse", "name", "version",
+        "deleteLater", "destroyed", "objectNameChanged",
+        "getPluginMethods", "getPluginEvents",
+    };
+    if (name.empty() || name.front() == '_')
+        return true;
+    return std::find(kInternal.begin(), kInternal.end(), name) != kInternal.end();
+}
+
+// The registry must not offer the workflow stack as workflow steps: executing
+// them from a workflow re-enters the very machinery running it.
+bool isExcludedModule(const std::string& name)
+{
+    return name.empty()
+        || name.rfind("workflow_", 0) == 0
+        || name == "capability_module"
+        || name == "core_manager";
+}
+
+std::string stringField(const json& obj, const char* key, const std::string& fallback = {})
+{
+    if (obj.is_object()) {
+        auto it = obj.find(key);
+        if (it != obj.end() && it->is_string())
+            return it->get<std::string>();
+    }
+    return fallback;
+}
+
+std::vector<MethodParam> parseParams(const json& raw)
+{
+    std::vector<MethodParam> params;
+    if (!raw.is_array())
+        return params;
+    for (const auto& entry : raw) {
+        MethodParam p;
+        p.name = stringField(entry, "name");
+        p.type = mapType(stringField(entry, "type"));
+        params.push_back(std::move(p));
+    }
+    return params;
+}
+
+// An lp invoke may hand back a JSON array directly or a STRING holding JSON,
+// depending on how the target module was generated. Normalise both rather
+// than betting on one.
+json asArray(const json& value)
+{
+    if (value.is_array())
+        return value;
+    if (value.is_string()) {
+        auto parsed = json::parse(value.get<std::string>(), nullptr, /*allow_exceptions=*/false);
+        if (!parsed.is_discarded() && parsed.is_array())
+            return parsed;
+    }
+    return json::array();
+}
+
+// One installed module directory -> its manifest facts. The .lgx installer
+// writes manifest.json; a module staged straight from a Nix build has
+// metadata.json instead. Read whichever is present, and fall back to the
+// directory name, which is what the host uses as the module name when it
+// stages a plugin — better a live-introspected module with a guessed version
+// than a missing palette entry.
+struct ManifestFacts {
+    std::string name;
+    std::string version = "0.0.0";
+    std::string type    = "core";
+};
+
+ManifestFacts readManifest(const fs::path& dir)
+{
+    ManifestFacts facts;
+
+    for (const char* candidate : { "manifest.json", "metadata.json" }) {
+        const fs::path file = dir / candidate;
+        std::error_code ec;
+        if (!fs::exists(file, ec))
+            continue;
+
+        std::ifstream in(file);
+        if (!in)
+            continue;
+
+        auto parsed = json::parse(in, nullptr, /*allow_exceptions=*/false);
+        if (parsed.is_discarded())
+            continue;
+
+        const std::string name = stringField(parsed, "name");
+        if (name.empty())
+            continue;
+
+        facts.name    = name;
+        facts.version = stringField(parsed, "version", "0.0.0");
+        facts.type    = stringField(parsed, "type", "core");
+        return facts;
+    }
+
+    facts.name = dir.filename().string();
+    return facts;
+}
+
+} // namespace
+
+RegistryBridgeLp::RegistryBridgeLp(std::string origin)
+    : m_origin(std::move(origin))
+{}
+
+std::vector<DiscoveredModule> RegistryBridgeLp::discoverModules(const std::string& modulesDir)
+{
+    std::vector<DiscoveredModule> modules;
+
+    if (modulesDir.empty()) {
+        std::fprintf(stderr,
+            "[workflow_registry] no modules directory (running outside a host?) "
+            "— palette will hold built-ins only\n");
+        return modules;
+    }
+
+    std::error_code ec;
+    const fs::path root(modulesDir);
+    if (!fs::is_directory(root, ec)) {
+        std::fprintf(stderr, "[workflow_registry] modules directory does not exist: %s\n",
+                     modulesDir.c_str());
+        return modules;
+    }
+
+    // Sorted, so the palette order is stable between runs rather than
+    // following directory-iteration order.
+    std::vector<fs::path> entries;
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+        if (entry.is_directory())
+            entries.push_back(entry.path());
+    }
+    std::sort(entries.begin(), entries.end());
+
+    for (const fs::path& dir : entries) {
+        const ManifestFacts facts = readManifest(dir);
+        if (isExcludedModule(facts.name))
+            continue;
+
+        DiscoveredModule mod;
+        mod.name    = facts.name;
+        mod.version = facts.version;
+        mod.type    = facts.type;
+
+        // Ask the module itself what it exposes. A module that is installed
+        // but not loaded fails the call — it stays in the list as a non-live
+        // entry so the canvas can grey it out rather than pretend it isn't
+        // there.
+        logos::LpClient client(facts.name, m_origin);
+
+        logos::CallError err;
+        const json methodsRaw = asArray(client.invoke("getPluginMethods", json::array(), &err));
+
+        for (const auto& entry : methodsRaw) {
+            const std::string methodName = stringField(entry, "name");
+            if (isInternalMethod(methodName))
+                continue;
+
+            MethodInfo method;
+            method.name       = methodName;
+            method.returnType = mapType(stringField(entry, "returnType"));
+            method.parameters = parseParams(entry.is_object() && entry.contains("parameters")
+                                                ? entry.at("parameters")
+                                                : json::array());
+            mod.methods.push_back(std::move(method));
+        }
+
+        // Events became a first-class part of the module surface after this
+        // registry was written; they are what a trigger node subscribes to.
+        const json eventsRaw = asArray(client.invoke("getPluginEvents", json::array(), &err));
+
+        for (const auto& entry : eventsRaw) {
+            const std::string eventName = stringField(entry, "name");
+            if (eventName.empty())
+                continue;
+
+            EventInfo event;
+            event.name       = eventName;
+            event.parameters = parseParams(entry.is_object() && entry.contains("parameters")
+                                               ? entry.at("parameters")
+                                               : json::array());
+            mod.events.push_back(std::move(event));
+        }
+
+        mod.isLive = !mod.methods.empty() || !mod.events.empty();
+
+        std::fprintf(stderr, "[workflow_registry] %s %s %zu methods, %zu events\n",
+                     facts.name.c_str(),
+                     mod.isLive ? "live:" : "installed, not live:",
+                     mod.methods.size(), mod.events.size());
+
+        modules.push_back(std::move(mod));
+    }
+
+    return modules;
+}

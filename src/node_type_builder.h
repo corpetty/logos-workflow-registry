@@ -64,6 +64,14 @@ private:
     static QString colorForModule(const QString& moduleName);
 
     /**
+     * @brief Map a port type to its display color.
+     *
+     * Lived on ModuleIntrospector until discovery moved behind
+     * RegistryBridge; it is presentation, so it belongs here.
+     */
+    static QString colorForType(const QString& portType);
+
+    /**
      * @brief Helper to build a port definition
      */
     static QJsonObject makePort(const QString& id, const QString& type,

@@ -1,5 +1,4 @@
 #include "node_type_builder.h"
-#include "module_introspector.h"
 
 #include <QDebug>
 
@@ -616,6 +615,16 @@ QJsonObject NodeTypeBuilder::makePort(const QString& id, const QString& type,
     port["type"] = type;
     port["label"] = label;
     port["direction"] = direction;
-    port["color"] = ModuleIntrospector::colorForType(type);
+    port["color"] = colorForType(type);
     return port;
+}
+
+QString NodeTypeBuilder::colorForType(const QString& portType)
+{
+    if (portType == "string")  return "#4caf50";  // green
+    if (portType == "number")  return "#ff9800";  // orange
+    if (portType == "boolean") return "#e91e63";  // pink
+    if (portType == "bytes")   return "#9e9e9e";  // grey
+    if (portType == "array")   return "#00bcd4";  // cyan
+    return "#26c6da";                              // teal (object)
 }

@@ -1,9 +1,11 @@
 {
   "name": "workflow_registry",
+  "display_name": "Workflow Registry",
   "version": "1.0.0",
-  "description": "Discovers loaded Logos modules and translates method signatures into workflow node type definitions",
+  "description": "Discovers installed Logos modules and translates their method signatures into workflow node type definitions",
   "author": "Logos Core Team",
   "type": "core",
+  "interface": "universal",
   "category": "integration",
   "main": "workflow_registry_plugin",
   "dependencies": [],
@@ -20,7 +22,8 @@
     "cmake": {
       "find_packages": [],
       "extra_sources": [],
-      "proto_files": []
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
     }
   }
 }
