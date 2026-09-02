@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <set>
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -150,6 +151,41 @@ ManifestFacts readManifest(const fs::path& dir)
     return facts;
 }
 
+// Every modules root to scan: the one this module was installed into, plus
+// anything named by LOGOS_WORKFLOW_MODULE_DIRS. A host can have more than one
+// root (basecamp bundles modules in the app AND installs them under the user
+// directory) and a module can only derive its own, so the extra roots are the
+// escape hatch for the ones it cannot see.
+std::vector<fs::path> moduleRoots(const std::string& ownRoot)
+{
+#ifdef _WIN32
+    constexpr char kSep = ';';
+#else
+    constexpr char kSep = ':';
+#endif
+
+    std::vector<fs::path> roots;
+    if (!ownRoot.empty())
+        roots.emplace_back(ownRoot);
+
+    if (const char* extra = std::getenv("LOGOS_WORKFLOW_MODULE_DIRS")) {
+        std::string spec(extra);
+        size_t start = 0;
+        while (start <= spec.size()) {
+            const size_t end = spec.find(kSep, start);
+            const std::string one =
+                spec.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (!one.empty())
+                roots.emplace_back(one);
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+    }
+
+    return roots;
+}
+
 } // namespace
 
 RegistryBridgeLp::RegistryBridgeLp(std::string origin)
@@ -160,7 +196,8 @@ std::vector<DiscoveredModule> RegistryBridgeLp::discoverModules(const std::strin
 {
     std::vector<DiscoveredModule> modules;
 
-    if (modulesDir.empty()) {
+    const std::vector<fs::path> roots = moduleRoots(modulesDir);
+    if (roots.empty()) {
         std::fprintf(stderr,
             "[workflow_registry] no modules directory (running outside a host?) "
             "— palette will hold built-ins only\n");
@@ -168,25 +205,32 @@ std::vector<DiscoveredModule> RegistryBridgeLp::discoverModules(const std::strin
     }
 
     std::error_code ec;
-    const fs::path root(modulesDir);
-    if (!fs::is_directory(root, ec)) {
-        std::fprintf(stderr, "[workflow_registry] modules directory does not exist: %s\n",
-                     modulesDir.c_str());
-        return modules;
-    }
 
     // Sorted, so the palette order is stable between runs rather than
     // following directory-iteration order.
     std::vector<fs::path> entries;
-    for (const auto& entry : fs::directory_iterator(root, ec)) {
-        if (entry.is_directory())
-            entries.push_back(entry.path());
+    for (const fs::path& root : roots) {
+        if (!fs::is_directory(root, ec)) {
+            std::fprintf(stderr, "[workflow_registry] modules directory does not exist: %s\n",
+                         root.string().c_str());
+            continue;
+        }
+        for (const auto& entry : fs::directory_iterator(root, ec)) {
+            if (entry.is_directory())
+                entries.push_back(entry.path());
+        }
     }
     std::sort(entries.begin(), entries.end());
+
+    std::set<std::string> seen;
 
     for (const fs::path& dir : entries) {
         const ManifestFacts facts = readManifest(dir);
         if (isExcludedModule(facts.name))
+            continue;
+        // The same module can sit in two roots (bundled and user-installed);
+        // the palette must list it once.
+        if (!seen.insert(facts.name).second)
             continue;
 
         DiscoveredModule mod;

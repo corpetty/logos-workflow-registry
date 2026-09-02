@@ -45,6 +45,13 @@ public:
      *        module's own install directory (LogosModuleContext::modulePath()).
      *        Empty when running outside a host, in which case the disk half is
      *        skipped and the result is empty rather than an error.
+     *
+     * A host may have more than one modules root — basecamp reads both a
+     * user-writable directory (where the package manager installs) and one
+     * bundled inside the app. A module can only derive the root it was itself
+     * installed into, so modules in the OTHER root are invisible here. Set
+     * LOGOS_WORKFLOW_MODULE_DIRS (colon-separated, ';' on Windows) to name
+     * extra roots to scan.
      */
     virtual std::vector<DiscoveredModule> discoverModules(const std::string& modulesDir) = 0;
 };
